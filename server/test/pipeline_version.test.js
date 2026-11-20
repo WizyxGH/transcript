@@ -106,7 +106,8 @@ test('API endpoints: backward compatibility for flat text search and structured 
   registerIssuePages(db, 'it/TL 3704', '/scans/it_TL_3704.cbz', ['p1.jpg', 'p2.jpg']);
 
   const structuredMock = JSON.stringify({
-    panels: [{ panel_index: 1, elements: [{ speaker: 'DD', text: 'CIAO PAPERINO' }] }],
+    panel_count: 2,
+    panels: [{ panel_index: 1, elements: [{ type: 'speech', speaker: 'DD', text: 'CIAO PAPERINO' }] }],
   });
 
   saveOcrResult(db, 1, {
@@ -169,6 +170,30 @@ test('API endpoints: backward compatibility for flat text search and structured 
 
   const issuesRepass = await core.handleIssues(adapter, { needs_repass: '1' });
   assert.equal(issuesRepass.body.length, 1);
+
+  // 6. Structured search filters (speaker, type) & parsed=1 param
+  const searchSpeaker = await core.handleSearch(adapter, { speaker: 'DD' });
+  assert.equal(searchSpeaker.status, 200);
+  assert.equal(searchSpeaker.body.total, 1);
+  assert.equal(searchSpeaker.body.hits[0].id, 2);
+
+  const searchType = await core.handleSearch(adapter, { type: 'speech' });
+  assert.equal(searchType.status, 200);
+  assert.equal(searchType.body.total, 1);
+  assert.equal(searchType.body.hits[0].id, 2);
+
+  const searchNotFound = await core.handleSearch(adapter, { speaker: 'UNKNOWN_CHAR' });
+  assert.equal(searchNotFound.body.total, 0);
+
+  // 7. parsed=1 returns structured as native JS object
+  const pageParsed = await core.handlePage(adapter, { id: 2, parsed: '1' });
+  assert.equal(typeof pageParsed.body.structured, 'object');
+  assert.equal(pageParsed.body.structured.panel_count, 2);
+  assert.equal(pageParsed.body.structured.panels[0].elements[0].speaker, 'DD');
+
+  const entryParsed = await core.handleEntry(adapter, { code: 'it/TL 3704', parsed: '1' });
+  assert.equal(typeof entryParsed.body.entries[0].pages[1].structured, 'object');
+  assert.equal(entryParsed.body.entries[0].pages[1].structured.panel_count, 2);
 
   // Upgrade page 1 to v2: pending_repass drops to 0
   db.prepare('UPDATE page SET pipeline_version = 2 WHERE id = 1').run();

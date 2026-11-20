@@ -1,18 +1,31 @@
-# Transcript — recherche plein texte dans les scans
+# Transcript & Vision — Transcription & Analyse Sémantique des Scans
 
-Fait l'OCR de chaque page de la bibliothèque de scans personnelle, puis permet de chercher un mot clé
-et de savoir **dans quelles entrées Inducks** il apparaît (titre, numéro, pages), avec le scan et sa
-transcription côte à côte.
+Moteur unifié d'OCR, de découpage de cases et de reconnaissance des personnages pour la bibliothèque de scans Disney. Permet la recherche plein texte par mots-clés, par personnage locuteur (`speaker=DD`), par type de bulle (`type=speech`), et la restitution en script de lecture / scénario.
 
-```
+```text
 bibliothèque (.cbr/.cbz)  ──index-library──▶  search.sqlite (pages en attente, cache SQLite 0 ms)
 Inducks (inducks_entry)   ──segment-library─▶  page → entrycode + titre + kind ('story')
-                           ──ocr_worker.py───▶  texte + index FTS5 (GPU CUDA, extraction 1-passe)
+                           ──pipeline (v2)───▶  cases + bulles + locuteurs (YOLO + ResNet + PaddleOCR)
                                                    │
-                         serveur Express :3001 ◀───┘──▶ client Vue :5173
+                         serveur Express :3001 ◀───┘──▶ client Vite :5173
                                  │ pousse les pages lues (toutes les 60 s)
                                  ▼
                          Turso (copie de l'index) ◀── Worker Cloudflare = API publique (clé d'API)
+```
+
+## Architecture du Projet
+
+```text
+apps/transcript/
+├── pipeline/                     # Moteur Python unifié (Vision + OCR + Structuration)
+│   ├── vision/                   # Découpage cases, détection personnages YOLOv8, locuteurs
+│   ├── ocr/                      # PaddleOCR, normalisation et clustering des bulles
+│   ├── core/                     # Extraction archives (CBZ/CBR), mémoire, orchestrateur
+│   ├── models/                   # yolov8n.pt (6.5 Mo), index vectoriel Inducks (72 Mo)
+│   └── cli.py                    # Point d'entrée CLI (python -m pipeline.cli)
+├── server/                       # Serveur Node.js / Express (API REST, FTS5, Turso sync)
+├── client/                       # Interface web Vite + React
+└── worker/                       # API Edge Cloudflare Worker (lecture Turso 24h/24)
 ```
 
 La recherche est aussi publique : un **Worker Cloudflare** sert les mêmes routes de lecture depuis une

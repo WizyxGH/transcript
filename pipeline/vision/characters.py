@@ -1,0 +1,187 @@
+"""
+Détecteur et identificateur de personnages Disney à l'échelle d'une planche de BD complète.
+Découpe les cases, localise les personnages, extrait les embeddings DINOv2 et consolide
+la liste des personnages présents (xapp) et le héro probable de la page.
+"""
+
+import os
+import json
+import argparse
+from typing import List, Dict, Tuple, Optional
+import numpy as np
+from PIL import Image
+
+try:
+    from ultralytics import YOLO
+    HAS_YOLO = True
+except ImportError:
+    HAS_YOLO = False
+
+try:
+    from pipeline.vision.search_character import CharacterMatcher, DEFAULT_INDEX_PATH
+    from pipeline.vision.panels import segment_panels_adaptive
+    from pipeline.config import YOLO_MODEL_PATH
+except ImportError:
+    from search_character import CharacterMatcher, DEFAULT_INDEX_PATH
+    from panels import segment_panels_adaptive
+    YOLO_MODEL_PATH = None
+
+# Classes COCO qui correspondent généralement aux personnages vivants dans un cartoon
+LIVING_CLASSES = {"person", "bird", "cat", "dog", "teddy bear", "horse", "sheep", "cow", "bear"}
+
+
+class PageCharacterDetector:
+    def __init__(self, index_path: str = DEFAULT_INDEX_PATH, yolo_model_path: Optional[str] = None):
+        self.matcher = CharacterMatcher(index_path=index_path)
+        yolo_path = yolo_model_path or (str(YOLO_MODEL_PATH) if YOLO_MODEL_PATH and YOLO_MODEL_PATH.exists() else "yolov8n.pt")
+        self.yolo_model = YOLO(yolo_path) if HAS_YOLO else None
+
+    def detect_in_panel(self, panel_img: Image.Image, min_score: float = 0.70) -> List[Dict]:
+        """Détecte et identifie les personnages présents à l'intérieur d'une case."""
+        pw, ph = panel_img.size
+        candidates: List[Tuple[Image.Image, List[int]]] = []
+
+        # A) Détection via YOLO si disponible (seuil abaissé pour cartoon)
+        if self.yolo_model:
+            try:
+                results = self.yolo_model(panel_img, conf=0.10, verbose=False)
+                for r in results:
+                    for b in r.boxes:
+                        name = self.yolo_model.names[int(b.cls[0])]
+                        conf = float(b.conf[0])
+                        if name in LIVING_CLASSES:
+                            x1, y1, x2, y2 = [int(v) for v in b.xyxy[0].tolist()]
+                            if (x2 - x1) >= 30 and (y2 - y1) >= 30:
+                                bw, bh = x2 - x1, y2 - y1
+                                x1_m = max(0, int(x1 - 0.15 * bw))
+                                y1_m = max(0, int(y1 - 0.15 * bh))
+                                x2_m = min(pw, int(x2 + 0.15 * bw))
+                                y2_m = min(ph, int(y2 + 0.15 * bh))
+                                candidates.append((
+                                    panel_img.crop((x1_m, y1_m, x2_m, y2_m)),
+                                    [x1_m, y1_m, x2_m, y2_m]
+                                ))
+            except Exception:
+                pass
+
+        # B) Propositions multi-échelles pour les cases larges ou splash (quand YOLO a un faible rappel cartoon)
+        if len(candidates) < 3 and pw >= 300 and ph >= 300:
+            # Grille glissante : découpe la case en sous-zones qui se chevauchent
+            # Tailles de fenêtre adaptées aux personnages debout (portrait) ou en pied
+            win_configs = []
+            # Fenêtres "personnage debout" : ~25-35% de largeur, ~30-40% de hauteur
+            for w_frac in [0.28, 0.35]:
+                for h_frac in [0.33, 0.40]:
+                    win_w = int(pw * w_frac)
+                    win_h = int(ph * h_frac)
+                    if win_w >= 100 and win_h >= 100:
+                        win_configs.append((win_w, win_h))
+
+            seen_zones = set()
+            for win_w, win_h in win_configs:
+                step_x = max(win_w // 2, 50)
+                step_y = max(win_h // 2, 50)
+                # Scan principalement dans la moitié inférieure (personnages debout au sol)
+                y_start = max(0, int(ph * 0.45))
+                for by in range(y_start, ph - win_h + 1, step_y):
+                    for bx in range(0, pw - win_w + 1, step_x):
+                        # Éviter les zones trop similaires à celles déjà vues
+                        zone_key = (bx // step_x, by // step_y)
+                        if zone_key in seen_zones:
+                            continue
+                        seen_zones.add(zone_key)
+                        candidates.append((
+                            panel_img.crop((bx, by, bx + win_w, by + win_h)),
+                            [bx, by, bx + win_w, by + win_h]
+                        ))
+
+        # C) Si aucun candidat, analyser la case entière
+        if not candidates and pw >= 60 and ph >= 60:
+            candidates.append((panel_img, [0, 0, pw, ph]))
+
+        # Identification via DINOv2
+        detections = []
+        seen_heroes_in_panel = set()
+
+        for crop, box in candidates:
+            preds = self.matcher.identify(crop, top_k=2, aggregate_by_hero=True)
+            if preds and preds[0]["score"] >= min_score:
+                h = preds[0]["hero"]
+                # Déduplication : on garde la meilleure boîte pour chaque héros dans cette case
+                if h not in seen_heroes_in_panel:
+                    seen_heroes_in_panel.add(h)
+                    detections.append({
+                        "hero": h,
+                        "score": preds[0]["score"],
+                        "reference": preds[0]["best_reference"],
+                        "box": box
+                    })
+
+        return detections
+
+    def analyze_page(self, img_input, min_score: float = 0.70) -> Dict[str, any]:
+        """
+        Analyse une page de BD complète :
+        1. Découpe en cases
+        2. Détection des personnages par case (avec coordonnées absolues)
+        3. Consolidation et classement des apparitions
+        """
+        if isinstance(img_input, str):
+            with Image.open(img_input) as f:
+                img = f.convert("RGB")
+        else:
+            img = img_input.convert("RGB")
+
+        panels = segment_panels_adaptive(img)
+        panel_detections = []
+        all_detections = []
+        hero_counts = {}
+        hero_max_scores = {}
+
+        for p_idx, (x1, y1, x2, y2) in enumerate(panels, start=1):
+            panel_crop = img.crop((x1, y1, x2, y2))
+            chars_in_panel = self.detect_in_panel(panel_crop, min_score=min_score)
+
+            seen_in_panel = set()
+            for det in chars_in_panel:
+                h = det["hero"]
+                score = det["score"]
+                bx1, by1, bx2, by2 = det["box"]
+                # Coordonnées absolues sur la planche complète
+                abs_box = [x1 + bx1, y1 + by1, x1 + bx2, y1 + by2]
+
+                all_detections.append({
+                    "hero": h,
+                    "score": score,
+                    "panel_index": p_idx,
+                    "panel_box": [x1, y1, x2, y2],
+                    "box": abs_box,
+                    "reference": det["reference"]
+                })
+
+                if h not in seen_in_panel:
+                    seen_in_panel.add(h)
+                    hero_counts[h] = hero_counts.get(h, 0) + 1
+                    hero_max_scores[h] = max(hero_max_scores.get(h, 0.0), score)
+
+            panel_detections.append({
+                "panel_index": p_idx,
+                "box": [x1, y1, x2, y2],
+                "characters": chars_in_panel
+            })
+
+        sorted_heroes = sorted(
+            hero_counts.keys(),
+            key=lambda h: (hero_counts[h], hero_max_scores[h]),
+            reverse=True
+        )
+
+        return {
+            "panels": panels,
+            "panel_detections": panel_detections,
+            "all_detections": all_detections,
+            "hero_counts": hero_counts,
+            "hero_max_scores": hero_max_scores,
+            "sorted_heroes": sorted_heroes,
+            "top_hero": sorted_heroes[0] if sorted_heroes else "--"
+        }

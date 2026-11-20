@@ -69,12 +69,14 @@ function groupByPublication(perIssue, pubOf) {
     let g = groups.get(pub.publicationcode);
     if (!g) {
       g = { publication: pub.publicationcode, title: pub.title, country: r.country, total_pages: 0,
-        done_pages: 0, pending_pages: 0, issues: 0, done_issues: 0, conf_sum: 0, first_issue: r.issuecode };
+        done_pages: 0, pending_pages: 0, v1_pages: 0, v2_pages: 0, issues: 0, done_issues: 0, conf_sum: 0, first_issue: r.issuecode };
       groups.set(pub.publicationcode, g);
     }
     g.total_pages += r.total_pages;
     g.done_pages += r.done_pages;
     g.pending_pages += r.pending_pages;
+    g.v1_pages += r.v1_pages || 0;
+    g.v2_pages += r.v2_pages || 0;
     g.issues += 1;
     if (r.done_pages) g.done_issues += 1;
     g.conf_sum += r.conf_sum || 0;
@@ -102,7 +104,10 @@ function getCoverageStats() {
     total_issues: 0,
     done_issues: 0,
     avg_confidence: 0,
-    completion_rate: '0.0%'
+    completion_rate: '0.0%',
+    v1_pages: 0,
+    v2_pages: 0,
+    pipeline_version_latest: 2
   };
 
   try {
@@ -112,6 +117,8 @@ function getCoverageStats() {
         coalesce(sum(CASE WHEN state = 'done' THEN 1 ELSE 0 END), 0) as done_pages,
         coalesce(sum(CASE WHEN state = 'pending' THEN 1 ELSE 0 END), 0) as pending_pages,
         coalesce(sum(CASE WHEN state = 'failed' THEN 1 ELSE 0 END), 0) as failed_pages,
+        coalesce(sum(CASE WHEN state = 'done' AND (pipeline_version IS NULL OR pipeline_version = 1) THEN 1 ELSE 0 END), 0) as v1_pages,
+        coalesce(sum(CASE WHEN state = 'done' AND pipeline_version >= 2 THEN 1 ELSE 0 END), 0) as v2_pages,
         count(distinct issuecode) as total_issues,
         count(distinct CASE WHEN state = 'done' THEN issuecode ELSE null END) as done_issues,
         round(avg(CASE WHEN state = 'done' THEN confidence ELSE null END), 3) as avg_confidence
@@ -124,6 +131,9 @@ function getCoverageStats() {
         done_pages: row.done_pages,
         pending_pages: row.pending_pages,
         failed_pages: row.failed_pages,
+        v1_pages: row.v1_pages,
+        v2_pages: row.v2_pages,
+        pipeline_version_latest: 2,
         total_issues: row.total_issues,
         done_issues: row.done_issues,
         avg_confidence: row.avg_confidence || 0,
@@ -143,6 +153,8 @@ function getCoverageStats() {
         count(*) as total_pages,
         sum(CASE WHEN state = 'done' THEN 1 ELSE 0 END) as done_pages,
         sum(CASE WHEN state = 'pending' THEN 1 ELSE 0 END) as pending_pages,
+        sum(CASE WHEN state = 'done' AND (pipeline_version IS NULL OR pipeline_version = 1) THEN 1 ELSE 0 END) as v1_pages,
+        sum(CASE WHEN state = 'done' AND pipeline_version >= 2 THEN 1 ELSE 0 END) as v2_pages,
         sum(CASE WHEN state = 'done' THEN confidence ELSE 0 END) as conf_sum
       FROM page
       GROUP BY issuecode

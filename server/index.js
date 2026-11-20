@@ -74,8 +74,16 @@ app.get('/', (req, res) => {
       <td>${p.country}</td>
       <td>${p.total_pages || p.pages || 0}</td>
       <td><span style="color: ${coverageColor(p).fg}; font-weight: bold;">${p.done_pages}</span></td>
+      <td>
+        <span style="font-size: 0.8rem; color: #fde68a;">v1: ${p.v1_pages || 0}</span>
+        ${(p.v2_pages > 0) ? `<span style="font-size: 0.8rem; color: #4ade80; font-weight: bold; margin-left: 0.3rem;">v2: ${p.v2_pages}</span>` : ''}
+        ${(p.v1_pages > 0 && p.done_pages > 0) ? `<div style="font-size: 0.72rem; color: #f87171;">⚠️ ${p.v1_pages} à repasser</div>` : ''}
+      </td>
       <td><span class="badge" style="background: ${coverageColor(p).bg}; color: ${coverageColor(p).fg};">${p.completion_rate}</span></td>
-      <td><a href="/api/search/entry?code=${encodeURIComponent(p.first_issue)}" target="_blank">Explorer ${p.first_issue}</a></td>
+      <td>
+        <a href="/api/search/entry?code=${encodeURIComponent(p.first_issue)}" target="_blank">Explorer</a>
+        ${(p.v1_pages > 0) ? ` · <a href="/api/search/issues?needs_repass=1" target="_blank" style="color: #f87171; font-size: 0.8rem;">repasse</a>` : ''}
+      </td>
     </tr>
   `).join('');
 
@@ -143,6 +151,18 @@ app.get('/', (req, res) => {
               <div class="stat-label">Planches OCRisées</div>
               <div class="stat-val" style="color: #fbbf24;">${coverage.overall.done_pages} / ${coverage.overall.total_pages}</div>
               <div class="stat-sub">Taux : <strong>${coverage.overall.completion_rate}</strong> | Confiance : ${(coverage.overall.avg_confidence * 100).toFixed(1)}%</div>
+            </div>
+
+            <div class="stat-box" style="border-left: 3px solid #a855f7;">
+              <div class="stat-label">Version OCR (Pipelines)</div>
+              <div class="stat-val" style="color: #c084fc;">
+                v2: <span style="color: #4ade80;">${coverage.overall.v2_pages || 0}</span> / v1: <span style="color: #fde68a;">${coverage.overall.v1_pages || 0}</span>
+              </div>
+              <div class="stat-sub">
+                ${coverage.overall.v1_pages > 0 
+                  ? `<span style="color: #f87171; font-weight: bold;">⚠️ ${coverage.overall.v1_pages} en v1</span> (<a href="/api/search/issues?needs_repass=1" target="_blank" style="color: #fca5a5;">voir numéros</a>)` 
+                  : '<span style="color: #4ade80;">✨ Tout à jour en v2</span>'}
+              </div>
             </div>
 
             <div class="stat-box">

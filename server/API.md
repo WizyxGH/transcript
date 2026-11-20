@@ -69,9 +69,12 @@ Effectue une recherche plein texte par mots-clés dans les bulles de dialogue de
 #### Paramètres de requête (Query params) :
 | Paramètre | Type | Requis | Description | Exemple |
 | :--- | :--- | :--- | :--- | :--- |
-| `q` | `string` | **Oui** | Mots ou phrase recherchée (insensible à la casse et aux accents) | `tondeuse`, `angle d'or` |
+| `q` | `string` | Non* | Mots ou phrase recherchée (insensible à la casse et aux accents). Optionnel si un filtre (`speaker`, `type`, etc.) est présent | `tondeuse`, `angle d'or` |
+| `speaker` | `string` | Non | Filtre par personnage / locuteur attribué dans les bulles (ex: code Inducks `DD`, `MK`, `DP`...) | `DD`, `MK` |
+| `type` | `string` | Non | Filtre par typologie d'élément textuel (`speech`, `narrative`, `sound_effect`, `header`) | `speech`, `sound_effect` |
 | `entries` | `boolean` | Non | Accepté pour compatibilité : `entries` (regroupement par entrée Inducks, calculé sur **toutes** les pages trouvées) est toujours renvoyé, avec `entryTotal` | `1` |
 | `country` | `string` | Non | Filtre par pays de publication | `France`, `Italy` |
+| `issue` | `string` | Non | Filtre par code de publication/tome | `it/TL 3704` |
 | `limit` | `integer` | Non | Nombre maximum de pages (`hits`, max `200`) et d'entrées (`entries`, max `1000`) renvoyées (défaut : `50`) | `20` |
 | `offset` | `integer` | Non | Décalage pour la pagination (défaut: `0`) | `0` |
 
@@ -180,11 +183,13 @@ Récupère le texte OCR, le niveau de confiance, le nombre de bulles, le statut 
 | Paramètre | Type | Requis | Description | Exemple |
 | :--- | :--- | :--- | :--- | :--- |
 | `id` | `integer` | **Oui** | Identifiant unique de la page dans `search.sqlite` | `42` |
+| `parsed` | `boolean` / `1` | Non | Si `1` ou `true`, parse côté serveur le payload JSON et renvoie l'objet natif sous la clé `structured` | `1` |
 
 #### Champs retournés :
 - `text` : Texte brut complet (compatibilité FTS5).
 - `pipeline_version` : Version du pipeline (`1` = OCR plein-texte simple, `2` = OCR structuré cases + bulles + attribution des locuteurs).
-- `structured_text` : Payload JSON sérialisé contenant le découpage des cases (`panels`), le typage (`speech`, `narrative`, `sound_effect`, `header`) et l'attribution des locuteurs (`speaker`, `speaker_confidence`).
+- `structured_text` : Payload JSON brut sérialisé (chaîne de caractères).
+- `structured` *(si `parsed=1`)* : Objet JSON désérialisé contenant le découpage des cases (`panels`), éléments textuels (`elements`), typologie (`speech`, `narrative`, `sound_effect`, `header`) et locuteurs (`speaker`, `speaker_confidence`).
 
 ---
 

@@ -14,8 +14,13 @@ server/logs/
 data/inducks-db/
 data/*.sqlite*
 data/scans/
+data/references/
+data/raw_scrapes/
+scratch/
 
 .turbo/
 __pycache__/
 *.pyc
+*.pyo
 *.pt
+!pipeline/models/yolov8n.pt

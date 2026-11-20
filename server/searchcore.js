@@ -80,6 +80,8 @@ function parseSearchFilters(query) {
   if (query.issue) filters.issuecode = String(query.issue);
   if (query.entry) filters.entrycode = String(query.entry);
   if (query.kind) filters.kind = String(query.kind);
+  if (query.speaker) filters.speaker = String(query.speaker).trim();
+  if (query.type) filters.type = String(query.type).trim();
   if (isTrue(query.stories_only)) filters.stories_only = true;
   if (query.min_confidence) filters.min_confidence = parseFloat(query.min_confidence);
   return filters;
@@ -102,6 +104,22 @@ function buildSearchFilter(filters) {
     params.push(filters.kind);
   } else if (filters.stories_only) {
     where.push(storyPageSql('p'));
+  }
+  if (filters.speaker) {
+    where.push(`(p.structured_text IS NOT NULL AND EXISTS (
+      SELECT 1 FROM json_each(p.structured_text, '$.panels') AS pnl,
+           json_each(COALESCE(json_extract(pnl.value, '$.elements'), json_extract(pnl.value, '$.dialogues'))) AS elem
+      WHERE UPPER(json_extract(elem.value, '$.speaker')) = UPPER(?)
+    ))`);
+    params.push(filters.speaker);
+  }
+  if (filters.type) {
+    where.push(`(p.structured_text IS NOT NULL AND EXISTS (
+      SELECT 1 FROM json_each(p.structured_text, '$.panels') AS pnl,
+           json_each(COALESCE(json_extract(pnl.value, '$.elements'), json_extract(pnl.value, '$.dialogues'))) AS elem
+      WHERE LOWER(json_extract(elem.value, '$.type')) = LOWER(?)
+    ))`);
+    params.push(filters.type);
   }
   if (filters.min_confidence != null && !Number.isNaN(filters.min_confidence)) {
     where.push('p.confidence >= ?');
@@ -141,6 +159,32 @@ async function countMatches(db, match, filters = {}) {
     JOIN page p ON p.id = page_fts.rowid
     WHERE page_fts MATCH ?${extra}
   `, [match, ...params]);
+  return Number(row?.n || 0);
+}
+
+/** Direct search without full-text match (e.g. browsing by speaker, type, issue, etc.). */
+async function searchPagesDirect(db, { limit = 50, offset = 0, ...filters } = {}) {
+  const { extra, params } = buildSearchFilter(filters);
+  const whereSql = extra ? `WHERE 1=1 ${extra}` : 'WHERE 1=1';
+  return db.all(`
+    SELECT p.id, p.entrycode, p.issuecode, p.pageno,
+           p.confidence, p.reviewed, p.width, p.height, p.title, p.storycode, p.kind,
+           SUBSTR(p.text, 1, 150) AS snippet
+    FROM page p
+    ${whereSql}
+    ORDER BY p.issuecode, p.pageno
+    LIMIT ? OFFSET ?
+  `, [...params, limit, offset]);
+}
+
+/** Count matching pages without full-text match. */
+async function countPagesDirect(db, filters = {}) {
+  const { extra, params } = buildSearchFilter(filters);
+  const whereSql = extra ? `WHERE 1=1 ${extra}` : 'WHERE 1=1';
+  const row = await db.get(`
+    SELECT COUNT(*) AS n FROM page p
+    ${whereSql}
+  `, params);
   return Number(row?.n || 0);
 }
 
@@ -367,6 +411,11 @@ async function resolvePagesQuery(db, code, options = {}) {
 
 // ── Request handlers ─────────────────────────────────────────────────────────
 
+const safeJsonParse = (str) => {
+  if (!str) return null;
+  try { return JSON.parse(str); } catch { return null; }
+};
+
 const json = (body, status = 200) => ({ status, type: 'application/json; charset=utf-8', body });
 const text = (body, type) => ({ status: 200, type: `${type}; charset=utf-8`, body });
 const floorOf = (options) => (options.confidenceFloor ?? DEFAULT_CONFIDENCE_FLOOR);
@@ -375,14 +424,38 @@ const floorOf = (options) => (options.confidenceFloor ?? DEFAULT_CONFIDENCE_FLOO
 async function handleSearch(db, query) {
   const q = query.q;
   const match = toMatchExpression(q);
-  if (!match) return json({ query: q || '', terms: [], total: 0, hits: [], entries: [] });
+  const filters = parseSearchFilters(query);
+  const hasFilter = Boolean(filters.speaker || filters.type || filters.country || filters.issuecode || filters.entrycode || filters.kind);
+
+  if (!match && !hasFilter) return json({ query: q || '', terms: [], total: 0, hits: [], entries: [] });
 
   const requested = parseInt(query.limit, 10) || 50;
   const limit = Math.min(requested, MAX_HITS);
   const offset = Math.max(parseInt(query.offset, 10) || 0, 0);
-  const filters = parseSearchFilters(query);
 
   try {
+    if (!match) {
+      const total = await countPagesDirect(db, filters);
+      const raw = await searchPagesDirect(db, { ...filters, limit, offset });
+      const hits = raw.map((r) => ({
+        id: r.id,
+        issuecode: r.issuecode,
+        entrycode: r.entrycode || null,
+        pageno: r.pageno,
+        confidence: r.confidence,
+        reviewed: !!r.reviewed,
+        width: r.width,
+        height: r.height,
+        snippet: readable(r.snippet),
+        title: r.title || null,
+        storycode: r.storycode || null,
+      }));
+      return json({
+        query: '', match: '', terms: [], total, limit, offset, hits,
+        entries: [], entryTotal: 0,
+      });
+    }
+
     const total = await countMatches(db, match, filters);
     const raw = await search(db, match, { ...filters, limit, offset });
     // The Inducks title is denormalised onto the page by segment-library.js.
@@ -525,6 +598,7 @@ async function handleEntry(db, query, options = {}) {
         text: p.text,
         pipeline_version: p.pipeline_version ?? 1,
         structured_text: p.structured_text ?? null,
+        structured: (isTrue(query.parsed) || query.parsed === '1') ? safeJsonParse(p.structured_text) : undefined,
         confidence: p.confidence,
         reviewed: !!p.reviewed,
         n_boxes: p.n_boxes,
@@ -603,6 +677,9 @@ async function handlePage(db, query, options = {}) {
   const out = {};
   for (const f of [...PAGE_FIELDS, ...(options.extraPageFields || [])]) out[f] = page[f] ?? null;
   out.reviewed = !!page.reviewed;
+  if (isTrue(query.parsed) || query.parsed === '1') {
+    out.structured = safeJsonParse(out.structured_text);
+  }
   return json(out);
 }
 
