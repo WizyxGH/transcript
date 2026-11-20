@@ -1,0 +1,20 @@
+node_modules/
+dist/
+dist-ssr/
+*.local
+.env
+.env.*
+!.env.example
+
+# Runtime logs
+server/logs/
+*.log
+
+# Databases & caches
+data/inducks-db/
+data/*.sqlite*
+data/scans/
+
+.turbo/
+__pycache__/
+*.pyc

@@ -1,0 +1,7 @@
+name = "transcript-api"
+main = "src/index.js"
+compatibility_date = "2026-10-01"
+
+# Secrets, set by `node scripts/deploy.js` from Archiving-Helper's .env:
+#   TURSO_URL    ← TRANSCRIPT_TURSO_URL
+#   TURSO_TOKEN  ← TRANSCRIPT_TURSO_READ_TOKEN (read-only)
