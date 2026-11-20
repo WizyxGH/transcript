@@ -61,6 +61,9 @@ function getSearchDb() {
       -- 'pending' = queued, 'done' = OCR'd, 'failed' = gave up (kept, not retried forever)
       state         TEXT NOT NULL DEFAULT 'pending',
       error         TEXT,
+      -- pipeline_version: 1 = simple text OCR, 2 = structured dialogue + panels + speakers
+      pipeline_version INTEGER NOT NULL DEFAULT 1,
+      structured_text  TEXT,
       -- set when a human has corrected the OCR text; corrections outrank the OCR
       reviewed       INTEGER NOT NULL DEFAULT 0,
       created_at    INTEGER DEFAULT (unixepoch()),
@@ -73,6 +76,7 @@ function getSearchDb() {
     CREATE INDEX IF NOT EXISTS idx_page_issue   ON page(issuecode);
     CREATE INDEX IF NOT EXISTS idx_page_state   ON page(state);
     CREATE INDEX IF NOT EXISTS idx_page_pending ON page(state, issuecode, pageno);
+    CREATE INDEX IF NOT EXISTS idx_page_version ON page(state, pipeline_version);
 
     -- Full-text index over the recognised text only. 'pending' pages are absent,
     -- so results never contain a page that has not been read yet.
@@ -83,6 +87,16 @@ function getSearchDb() {
       tokenize = "unicode61 remove_diacritics 2"
     );
   `);
+
+  // Migrations for existing databases
+  const existingCols = _db.pragma('table_info(page)').map((c) => c.name);
+  if (!existingCols.includes('pipeline_version')) {
+    _db.exec('ALTER TABLE page ADD COLUMN pipeline_version INTEGER NOT NULL DEFAULT 1');
+  }
+  if (!existingCols.includes('structured_text')) {
+    _db.exec('ALTER TABLE page ADD COLUMN structured_text TEXT');
+  }
+
   return _db;
 }
 
@@ -119,14 +133,15 @@ function registerIssuePages(db, issuecode, archivePath, pages, { entrycode = nul
 }
 
 /** Store the OCR result for one page and put its text into the index. */
-function saveOcrResult(db, pageId, { text, confidence, nBoxes, engine, ms, width, height }) {
+function saveOcrResult(db, pageId, { text, confidence, nBoxes, engine, ms, width, height, pipeline_version = 1, structured_text = null }) {
   const row = db.prepare('SELECT reviewed FROM page WHERE id = ?').get(pageId);
   if (!row) throw new Error(`page ${pageId} not found`);
   db.prepare(`
     UPDATE page SET text = ?, confidence = ?, n_boxes = ?, ocr_engine = ?, ocr_ms = ?,
-                    width = ?, height = ?, state = 'done', error = NULL, updated_at = unixepoch()
+                    width = ?, height = ?, pipeline_version = ?, structured_text = ?,
+                    state = 'done', error = NULL, updated_at = unixepoch()
     WHERE id = ?
-  `).run(text || '', confidence, nBoxes, engine, ms, width || null, height || null, pageId);
+  `).run(text || '', confidence, nBoxes, engine, ms, width || null, height || null, pipeline_version, structured_text || null, pageId);
 
   // A reviewed page keeps the corrected text; re-running the OCR must not undo it.
   if (row.reviewed) return;
