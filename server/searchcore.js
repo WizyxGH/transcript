@@ -224,22 +224,63 @@ async function progress(db, floor = DEFAULT_CONFIDENCE_FLOOR) {
   const out = {};
   for (const k of ['total', 'done', 'pending', 'failed', 'reviewed', 'issues']) out[k] = Number(row?.[k] || 0);
   out.indexed = Number(indexed?.n || 0);
+
+  let v1 = out.done;
+  let v2 = 0;
+  try {
+    const vRow = await db.get(`
+      SELECT
+        SUM(state = 'done' AND (pipeline_version IS NULL OR pipeline_version = 1)) AS v1,
+        SUM(state = 'done' AND pipeline_version >= 2) AS v2
+      FROM page
+    `, []);
+    if (vRow) {
+      v1 = Number(vRow.v1 || 0);
+      v2 = Number(vRow.v2 || 0);
+    }
+  } catch {}
+  out.pipeline_version_latest = 2;
+  out.pipeline_v1 = v1;
+  out.pipeline_v2 = v2;
+  out.reprocess_needed = v1;
+
   return out;
 }
 
 /** Indexed issues with their OCR status. */
-async function issues(db, floor = DEFAULT_CONFIDENCE_FLOOR) {
-  return db.all(`
-    SELECT issuecode, country, languagecode,
-           COUNT(*)                                  AS pages,
-           SUM(state = 'done')                       AS done,
-           SUM(state = 'pending')                    AS pending,
-           SUM(state = 'failed')                     AS failed,
-           SUM(state = 'done' AND confidence >= ?)   AS indexed
-    FROM page
-    GROUP BY issuecode
-    ORDER BY issuecode
-  `, [floor]);
+async function issues(db, floor = DEFAULT_CONFIDENCE_FLOOR, filterOptions = {}) {
+  let rows = [];
+  try {
+    rows = await db.all(`
+      SELECT issuecode, country, languagecode,
+             COUNT(*)                                  AS pages,
+             SUM(state = 'done')                       AS done,
+             SUM(state = 'pending')                    AS pending,
+             SUM(state = 'failed')                     AS failed,
+             SUM(state = 'done' AND confidence >= ?)   AS indexed,
+             SUM(state = 'done' AND (pipeline_version IS NULL OR pipeline_version < 2)) AS pending_repass
+      FROM page
+      GROUP BY issuecode
+      ORDER BY issuecode
+    `, [floor]);
+  } catch {
+    rows = await db.all(`
+      SELECT issuecode, country, languagecode,
+             COUNT(*)                                  AS pages,
+             SUM(state = 'done')                       AS done,
+             SUM(state = 'pending')                    AS pending,
+             SUM(state = 'failed')                     AS failed,
+             SUM(state = 'done' AND confidence >= ?)   AS indexed,
+             0                                         AS pending_repass
+      FROM page
+      GROUP BY issuecode
+      ORDER BY issuecode
+    `, [floor]);
+  }
+  if (filterOptions.needsRepass) {
+    rows = rows.filter((r) => Number(r.pending_repass || 0) > 0);
+  }
+  return rows;
 }
 
 /**
@@ -402,8 +443,7 @@ async function handleEntry(db, query, options = {}) {
   }
 
   const pages = await db.all(`
-    SELECT id, entrycode, issuecode, languagecode, pageno, confidence, reviewed, n_boxes,
-           text, state, width, height, kind, title, storycode
+    SELECT *
     FROM page
     WHERE ${where.join(' AND ')}
     ORDER BY issuecode, pageno
@@ -483,6 +523,8 @@ async function handleEntry(db, query, options = {}) {
         title: p.title,
         storycode: p.storycode || null,
         text: p.text,
+        pipeline_version: p.pipeline_version ?? 1,
+        structured_text: p.structured_text ?? null,
         confidence: p.confidence,
         reviewed: !!p.reviewed,
         n_boxes: p.n_boxes,
@@ -536,14 +578,20 @@ async function handleProgress(db, options = {}) {
 }
 
 /** GET /api/search/issues — `options.issues` replaces the live count (hosted stats). */
-async function handleIssues(db, options = {}) {
-  return json(options.issues ? await options.issues() : await issues(db, floorOf(options)));
+async function handleIssues(db, query = {}, options = {}) {
+  if (query && (query.confidenceFloor != null || query.issues)) {
+    options = query;
+    query = {};
+  }
+  const needsRepass = query.needs_repass === '1' || query.needs_repass === 'true';
+  return json(options.issues ? await options.issues() : await issues(db, floorOf(options), { needsRepass }));
 }
 
 /** Fields of GET /api/search/page; the local host adds its private ones (archive path…). */
 const PAGE_FIELDS = [
   'id', 'issuecode', 'entrycode', 'storycode', 'country', 'languagecode', 'pageno', 'title', 'kind',
   'text', 'confidence', 'n_boxes', 'state', 'width', 'height', 'ocr_engine',
+  'pipeline_version', 'structured_text',
 ];
 
 /** GET /api/search/page?id=N */
@@ -563,7 +611,7 @@ const ROUTES = {
   '': (db, query) => handleSearch(db, query),
   '/entry': handleEntry,
   '/progress': (db, _query, options) => handleProgress(db, options),
-  '/issues': (db, _query, options) => handleIssues(db, options),
+  '/issues': (db, query, options) => handleIssues(db, query, options),
   '/page': handlePage,
 };
 

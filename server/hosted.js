@@ -35,7 +35,9 @@ let lastStatsPushTime = 0;
 /** Columns copied to the hosted page table, in order. */
 const HOSTED_COLUMNS = [
   'id', 'entrycode', 'storycode', 'issuecode', 'country', 'languagecode', 'title', 'kind', 'pageno',
-  'width', 'height', 'text', 'confidence', 'n_boxes', 'ocr_engine', 'state', 'reviewed', 'updated_at',
+  'width', 'height', 'text', 'confidence', 'n_boxes', 'ocr_engine',
+  'pipeline_version', 'structured_text',
+  'state', 'reviewed', 'updated_at',
 ];
 
 const HOSTED_SCHEMA = [
@@ -43,6 +45,7 @@ const HOSTED_SCHEMA = [
      id INTEGER PRIMARY KEY, entrycode TEXT, storycode TEXT, issuecode TEXT NOT NULL, country TEXT,
      languagecode TEXT, title TEXT, kind TEXT, pageno INTEGER NOT NULL, width INTEGER,
      height INTEGER, text TEXT, confidence REAL, n_boxes INTEGER, ocr_engine TEXT,
+     pipeline_version INTEGER NOT NULL DEFAULT 1, structured_text TEXT,
      state TEXT NOT NULL, reviewed INTEGER NOT NULL DEFAULT 0, updated_at INTEGER)`,
   'CREATE INDEX IF NOT EXISTS idx_page_entry ON page(entrycode)',
   'CREATE INDEX IF NOT EXISTS idx_page_issue ON page(issuecode)',
@@ -76,7 +79,8 @@ function ensureLocalQueue(db) {
     CREATE TRIGGER IF NOT EXISTS hosted_page_insert AFTER INSERT ON page BEGIN
       INSERT OR REPLACE INTO hosted_dirty (id, seq) VALUES (NEW.id, ${NEXT_SEQ});
     END;
-    CREATE TRIGGER IF NOT EXISTS hosted_page_update AFTER UPDATE OF ${WATCHED.join(', ')} ON page BEGIN
+    DROP TRIGGER IF EXISTS hosted_page_update;
+    CREATE TRIGGER hosted_page_update AFTER UPDATE OF ${WATCHED.join(', ')} ON page BEGIN
       INSERT OR REPLACE INTO hosted_dirty (id, seq) VALUES (NEW.id, ${NEXT_SEQ});
     END;
     CREATE TRIGGER IF NOT EXISTS hosted_page_delete AFTER DELETE ON page BEGIN
@@ -135,6 +139,10 @@ async function pushStats(local, remote, floor) {
  */
 async function syncHosted(local, remote, { floor, batchSize = 400, maxBatches = Infinity, forceStats = false, log = () => {} } = {}) {
   ensureLocalQueue(local);
+  if (typeof remote.execute === 'function') {
+    try { await remote.execute({ sql: 'ALTER TABLE page ADD COLUMN pipeline_version INTEGER NOT NULL DEFAULT 1', args: [] }); } catch {}
+    try { await remote.execute({ sql: 'ALTER TABLE page ADD COLUMN structured_text TEXT', args: [] }); } catch {}
+  }
   await remote.batch(HOSTED_SCHEMA.map((sql) => ({ sql, args: [] })), 'write');
 
   const next = local.prepare(`

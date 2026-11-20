@@ -55,6 +55,8 @@ py -3.12 ocr_worker.py --worker-id 1 --num-workers 2 --continuous
 
 # Utilitaires ponctuels :
 py -3.12 ocr_worker.py --list                      # État de la file d'attente
+py -3.12 ocr_worker.py --reprocess-list            # Liste des numéros à repasser vers le pipeline v2 (structuré)
+py -3.12 ocr_worker.py --reprocess --issue "it/TL 3704" # Repasser un numéro en version 2
 py -3.12 ocr_worker.py --issue "fr/JMC   5"        # Traiter un seul numéro
 py -3.12 ocr_worker.py --country France --all      # Traiter un pays entier
 

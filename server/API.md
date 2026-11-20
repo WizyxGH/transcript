@@ -174,12 +174,41 @@ En `format=text` et `format=markdown`, chaque entrée a son propre en-tête quan
 ## 2. Transcriptions & Pages
 
 ### `GET /api/search/page`
-Récupère le texte OCR, le niveau de confiance, le nombre de bulles et le statut de relecture d'une page individuelle.
+Récupère le texte OCR, le niveau de confiance, le nombre de bulles, le statut de relecture, ainsi que les données structurées et la version du pipeline pour une page individuelle.
 
 #### Paramètres :
 | Paramètre | Type | Requis | Description | Exemple |
 | :--- | :--- | :--- | :--- | :--- |
 | `id` | `integer` | **Oui** | Identifiant unique de la page dans `search.sqlite` | `42` |
+
+#### Champs retournés :
+- `text` : Texte brut complet (compatibilité FTS5).
+- `pipeline_version` : Version du pipeline (`1` = OCR plein-texte simple, `2` = OCR structuré cases + bulles + attribution des locuteurs).
+- `structured_text` : Payload JSON sérialisé contenant le découpage des cases (`panels`), le typage (`speech`, `narrative`, `sound_effect`, `header`) et l'attribution des locuteurs (`speaker`, `speaker_confidence`).
+
+---
+
+### `GET /api/search/progress`
+Progression globale de l'indexation OCR et versioning des pipelines.
+
+#### Champs retournés :
+- `total`, `done`, `pending`, `failed`, `reviewed`, `issues`
+- `pipeline_version_latest` : Dernière version disponible du pipeline (`2`).
+- `pipeline_v1` : Nombre de pages traitées en v1 (texte brut).
+- `pipeline_v2` : Nombre de pages traitées en v2 (structurées).
+- `reprocess_needed` : Nombre de pages en attente de repasse vers la dernière version.
+
+---
+
+### `GET /api/search/issues`
+Statut d'indexation par numéro/parution.
+
+#### Paramètres optionnels :
+- `needs_repass=1` : Filtre uniquement les numéros ayant des planches traitées en v1 qui nécessitent une repasse en v2 (`pending_repass > 0`).
+
+#### Champs par issue :
+- `issuecode`, `country`, `languagecode`, `pages`, `done`, `pending`, `failed`, `indexed`
+- `pending_repass` : Nombre de pages nécessitant une repasse vers le dernier pipeline.
 
 ---
 

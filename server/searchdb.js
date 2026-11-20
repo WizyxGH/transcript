@@ -136,6 +136,14 @@ function registerIssuePages(db, issuecode, archivePath, pages, { entrycode = nul
 function saveOcrResult(db, pageId, { text, confidence, nBoxes, engine, ms, width, height, pipeline_version = 1, structured_text = null }) {
   const row = db.prepare('SELECT reviewed FROM page WHERE id = ?').get(pageId);
   if (!row) throw new Error(`page ${pageId} not found`);
+
+  // With an external-content FTS5 table, delete old index tokens before updating the content row.
+  if (!row.reviewed) {
+    try {
+      db.prepare('DELETE FROM page_fts WHERE rowid = ?').run(pageId);
+    } catch {}
+  }
+
   db.prepare(`
     UPDATE page SET text = ?, confidence = ?, n_boxes = ?, ocr_engine = ?, ocr_ms = ?,
                     width = ?, height = ?, pipeline_version = ?, structured_text = ?,
@@ -145,9 +153,12 @@ function saveOcrResult(db, pageId, { text, confidence, nBoxes, engine, ms, width
 
   // A reviewed page keeps the corrected text; re-running the OCR must not undo it.
   if (row.reviewed) return;
-  db.prepare('DELETE FROM page_fts WHERE rowid = ?').run(pageId);
   if (text && text.trim() && confidence >= CONFIDENCE_FLOOR) {
-    db.prepare('INSERT INTO page_fts (rowid, text) VALUES (?, ?)').run(pageId, text);
+    try {
+      db.prepare('INSERT INTO page_fts (rowid, text) VALUES (?, ?)').run(pageId, text);
+    } catch {
+      try { db.exec("INSERT INTO page_fts(page_fts) VALUES('rebuild')"); } catch {}
+    }
   }
 }
 

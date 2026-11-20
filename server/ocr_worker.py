@@ -923,6 +923,12 @@ def connect():
     # malformed". The Node server and the indexer are separate processes on this
     # file; the busy timeout is what resolves them.
     db.execute("PRAGMA busy_timeout = 60000")
+    # Schema check for pipeline_version and structured_text
+    cols = [r["name"] for r in db.execute("PRAGMA table_info(page)").fetchall()]
+    if "pipeline_version" not in cols:
+        db.execute("ALTER TABLE page ADD COLUMN pipeline_version INTEGER NOT NULL DEFAULT 1")
+    if "structured_text" not in cols:
+        db.execute("ALTER TABLE page ADD COLUMN structured_text TEXT")
     return db
 
 
@@ -952,9 +958,9 @@ def story_page_sql():
     return f"(kind IN ({kinds}) OR (COALESCE(kind, '') = '' AND title IS NOT NULL))"
 
 
-def pending_pages(db, limit, issuecode=None, country=None, max_issues=None, stories_only=False, worker_id=0, num_workers=1):
+def pending_pages(db, limit, issuecode=None, country=None, max_issues=None, stories_only=False, worker_id=0, num_workers=1, reprocess=False):
     """Pending pages, in scan order, optionally filtered."""
-    where = ["state = 'pending'"]
+    where = ["state = 'done' AND (pipeline_version IS NULL OR pipeline_version < 2)"] if reprocess else ["state = 'pending'"]
     if stories_only:
         where.append(story_page_sql())
     params = []
@@ -1022,16 +1028,17 @@ def _fts_write(db, page_id, text, conf, floor):
             db.execute("INSERT INTO page_fts(page_fts) VALUES('rebuild')")
 
 
-def store(db, page_id, text, conf, n_boxes, ms, w, h, engine, floor):
+def store(db, page_id, text, conf, n_boxes, ms, w, h, engine, floor, pipeline_version=1, structured_text=None):
     """Write the OCR result and index it only if it is confident enough."""
     row = db.execute("SELECT reviewed FROM page WHERE id = ?", (page_id,)).fetchone()
     if row is None:
         return
     db.execute(
         """UPDATE page SET text = ?, confidence = ?, n_boxes = ?, ocr_engine = ?, ocr_ms = ?,
-                           width = ?, height = ?, state = 'done', error = NULL, updated_at = unixepoch()
+                           width = ?, height = ?, pipeline_version = ?, structured_text = ?,
+                           state = 'done', error = NULL, updated_at = unixepoch()
            WHERE id = ?""",
-        (text, conf, n_boxes, engine, ms, w, h, page_id),
+        (text, conf, n_boxes, engine, ms, w, h, pipeline_version, structured_text, page_id),
     )
     if row["reviewed"]:
         # A human already corrected this page; the OCR must not overwrite it.
@@ -1102,6 +1109,10 @@ def main():
     ap.add_argument("--num-workers", type=int, default=1, help="Total number of parallel workers")
     ap.add_argument("--rec-batch-num", type=int, default=None,
                     help="Batch size for recognition (default: 8 in multi-worker, 16 in single worker)")
+    ap.add_argument("--reprocess-list", action="store_true",
+                    help="show issues that need a v2 pipeline repass and exit")
+    ap.add_argument("--reprocess", action="store_true",
+                    help="process pages that already have state='done' but pipeline_version < 2")
     ap.add_argument("--no-supervise", action="store_true",
                     help="internal: run the OCR loop in this process (set by the supervisor)")
     args = ap.parse_args()
@@ -1143,6 +1154,25 @@ def main():
             print(f"  … and {len(rows) - 40} more issues")
         return
 
+    if args.reprocess_list:
+        rows = db.execute(
+            """SELECT issuecode, country, COUNT(*) AS pages,
+                      SUM(state = 'done') AS done,
+                      SUM(state = 'done' AND (pipeline_version IS NULL OR pipeline_version < 2)) AS pending_repass
+               FROM page GROUP BY issuecode
+               HAVING pending_repass > 0
+               ORDER BY issuecode"""
+        ).fetchall()
+        total_repass = sum(r["pending_repass"] for r in rows)
+        total_done = db.execute("SELECT COUNT(*) FROM page WHERE state='done'").fetchone()[0]
+        print(f"Repass needed: {total_repass} pages across {len(rows)} issues (sur {total_done} pages terminées)")
+        for r in rows[:40]:
+            print(f"  {r['issuecode']:<16} {r['country'] or '?':<6} "
+                  f"{r['pending_repass']:>4} pages à repasser (sur {r['done']} traitées)")
+        if len(rows) > 40:
+            print(f"  … et {len(rows) - 40} autres numéros")
+        return
+
     # 8 lines per recognition batch, whatever the worker count: at 16 a text-heavy page
     # (be/HBIV 1977 p7, 51 lines, 4 700 chars) overflows the 4 GB GPU, while 8 reads it
     # with the same text and confidence (0.961 vs 0.962 at 4). Measured, not guessed.
@@ -1160,7 +1190,8 @@ def main():
             pages = pending_pages(
                 db, limit, args.issue, country=args.country,
                 max_issues=args.max_issues, stories_only=args.stories_only,
-                worker_id=args.worker_id, num_workers=args.num_workers
+                worker_id=args.worker_id, num_workers=args.num_workers,
+                reprocess=args.reprocess
             )
             beat()
             if not pages:
